@@ -28,6 +28,7 @@ import qualified Data.ByteString.Internal as S (c2w, w2c)
 import qualified Test.HUnit          as HU
 import qualified Test.QuickCheck     as QC
 import qualified Test.SmallCheck     as SC
+import qualified Test.SmallCheck.Series as SC
 -- import qualified Test.LazySmallCheck as LSC
 -- import qualified Test.SparseCheck    as PC
 
@@ -82,10 +83,10 @@ main  = do
     putStrLn "smallcheck @ ():" -- Beware the exponential!
     checkSmall 3 (prop_insert        :: Str -> () -> T.Trie () -> Bool)
     checkSmall 7 (prop_singleton     :: Str -> () -> Bool)
-    checkSmall 3 (prop_size_insert   :: Str -> () -> T.Trie () -> SC.Property)
-    checkSmall 3 (prop_size_delete   :: Str -> () -> T.Trie () -> SC.Property)
-    checkSmall 3 (prop_insert_delete :: Str -> () -> T.Trie () -> SC.Property)
-    checkSmall 3 (prop_delete_lookup :: Str -> T.Trie () -> SC.Property)
+    checkSmall 3 (prop_size_insert   :: Str -> () -> T.Trie () -> SC.Property IO)
+    checkSmall 3 (prop_size_delete   :: Str -> () -> T.Trie () -> SC.Property IO)
+    checkSmall 3 (prop_insert_delete :: Str -> () -> T.Trie () -> SC.Property IO)
+    checkSmall 3 (prop_delete_lookup :: Str -> T.Trie () -> SC.Property IO)
     checkSmall 3 (prop_submap1       :: Str -> T.Trie () -> Bool)
     checkSmall 3 (prop_submap2       :: Str -> T.Trie () -> Bool)
     -- checkSmall 3 (prop_submap3 :: Str -> T.Trie () -> Bool)
@@ -112,7 +113,7 @@ main  = do
         QC.quickCheckWith (QC.stdArgs
             { QC.maxSize    = n
             , QC.maxSuccess = n
-            , QC.maxDiscard = 1000 `max` 10*n
+            , QC.maxDiscardRatio = 1000 `max` 10*n
             })
 #endif
     checkSmall d f = SC.smallCheck d f >> putStrLn ""
@@ -231,25 +232,29 @@ instance (QC.Arbitrary a) => QC.Arbitrary (T.Trie a) where
 -- cf <http://www.cs.york.ac.uk/fp/darcs/smallcheck/README>
 -- type Series a = Int -> [a]
 
-instance SC.Serial Letter where
-    series      d = take (d+1) $ map Letter letters
-    coseries rs d = do f <- SC.coseries rs d
-                       return $ \c -> f (fromEnum (unLetter c) - fromEnum 'a')
+instance Monad m => SC.Serial m Letter where
+    series      = SC.generate $ \d -> take (d+1) (map Letter letters)
+
+instance Monad m => SC.CoSerial m Letter where
+    coseries rs =
+      SC.coseries rs SC.>>- \f ->
+      return $ \c -> f (fromEnum (unLetter c) - fromEnum 'a')
     
-instance SC.Serial Str where
-    series      d = liftM (Str . packC2W . map unLetter)
-                          (SC.series d :: [[Letter]])
-    
-    coseries rs d = do y <- SC.alts0 rs d
-                       f <- SC.alts2 rs d
-                       return $ \(Str xs) ->
-                           if S.null xs
-                           then y
-                           else f (Letter . S.w2c $ S.head xs)
-                                  (Str $ S.tail xs)
+instance Monad m => SC.Serial m Str where
+    series      = liftM (Str . packC2W . map unLetter)
+                        (SC.series :: Monad m => SC.Series m [Letter])
+
+instance Monad m => SC.CoSerial m Str where
+    coseries rs =
+      SC.alts0 rs SC.>>- \y ->
+      SC.alts2 rs SC.>>- \f ->
+      return $ \(Str xs) -> if S.null xs
+                            then y
+                            else f (Letter . S.w2c $ S.head xs)
+                                   (Str $ S.tail xs)
 
 -- TODO: This instance really needs some work. The smart constructures ensure only valid values are generated, but there are redundancies and inefficiencies.
-instance (Monoid a, SC.Serial a) => SC.Serial (T.Trie a) where
+instance (Monad m, Monoid a, SC.Serial m a) => SC.Serial m (T.Trie a) where
     series =      SC.cons0 T.empty
            SC.\/  SC.cons3 arcHACK
            SC.\/  SC.cons2 mappend
@@ -258,6 +263,7 @@ instance (Monoid a, SC.Serial a) => SC.Serial (T.Trie a) where
            arcHACK (Str k) (Just v) t = T.singleton k v
                                          >>= T.unionR t . T.singleton S.empty
     
+instance (Monad m, Monoid a, SC.CoSerial m a) => SC.CoSerial m (T.Trie a) where
     -- coseries :: Series b -> Series (Trie a -> b)
     coseries = error "coseries@Trie: not implemented"
 
@@ -281,7 +287,7 @@ class CheckGuard a b where
 instance (QC.Testable a) => CheckGuard a QC.Property where
     (==>) = (QC.==>)
 
-instance (SC.Testable a) => CheckGuard a SC.Property where
+instance (Monad m, SC.Testable m a) => CheckGuard a (SC.Property m) where
     (==>) = (SC.==>)
 
 prop_size_insert :: (Eq a, CheckGuard Bool b) => Str -> a -> T.Trie a -> b
